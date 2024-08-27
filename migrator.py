@@ -11,12 +11,12 @@ aws_secret_key = ''
 aws_region = ''
 
 # PostgreSQL Configuration
-postgres_db = ''
-postgres_user = ''
+postgres_db = 'metadb'
+postgres_user = 'postgres'
 postgres_password = ''
-postgres_host = ''
-postgres_port = ''
-table_name = 's'
+postgres_host = 'localhost'
+postgres_port = '5432'
+table_name = 'event_metadata'
 
 # Parquet file size limit (in bytes)
 parquet_file_size_limit = 500 * 1024 * 1024  # 500MB
@@ -32,48 +32,33 @@ def upload_to_s3(file_path, s3_path):
     os.remove(file_path)  # Remove the file after uploading to S3
     print(f"Uploaded {file_path} to {s3_path}")
 
-def process_chunk(chunk_query, file_index):
-    parquet_file = f'temp_{file_index}.parquet'
-    
-    # Connect to DuckDB and run the query to fetch the chunk
-    con = duckdb.connect(database=':memory:')
-    con.sql(chunk_query).write_parquet(parquet_file)
+def process_chunk(con,parquet_file): #Should add an indexing parameter to seggregate data.
+
+    con.sql(f"""COPY (SELECT * FROM events.{table_name}) TO '{parquet_file}' (FORMAT PARQUET)""")
 
     # Upload to S3
     s3_path = f"{s3_folder}{parquet_file}"
     upload_to_s3(parquet_file, s3_path)
 
 def export_postgres_to_parquet():
+    threads = []
     con = duckdb.connect(database=':memory:')
-    
+
     # Connect to PostgreSQL
     con.execute(f"""
-    SET postgres_enable_http_proxy=1;
-    INSTALL postgres_scanner;
-    LOAD postgres_scanner;
+    INSTALL postgres;
+    LOAD postgres;
     """)
+
+    con.execute(f"""
+                ATTACH 'dbname=metadb user=postgres host=127.0.0.1' AS events (TYPE POSTGRES);
+                """)
     
-    # Scan the PostgreSQL table using the DuckDB connection
-    con.sql(f"""
-    COPY (
-        SELECT * FROM '{postgres_db}.{table_name}' 
-        WHERE INDEX_CONDITION -- Adjust this based on your indexing
-    ) TO 's3://{s3_bucket_name}/{s3_folder}file.parquet' 
-    (FORMAT PARQUET, PARTITION BY chunk_size)
-    """)
-    
-    # Get the number of rows and the estimated number of chunks based on file size limit
-    total_rows = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-    rows_per_chunk = int(parquet_file_size_limit / con.execute(f"SELECT avg_row_size FROM {table_name}").fetchone()[0])
-    total_chunks = total_rows // rows_per_chunk + (1 if total_rows % rows_per_chunk else 0)
-    
-    threads = []
-    for i in range(total_chunks):
-        offset = i * rows_per_chunk
-        chunk_query = f"SELECT * FROM {table_name} LIMIT {rows_per_chunk} OFFSET {offset}"
-        thread = threading.Thread(target=process_chunk, args=(chunk_query, i))
-        threads.append(thread)
-        thread.start()
+    # Should loop this according to the indexing parameter and parquet file size.
+    parquet_file = f'/Users/sriramreddy.bhimavarapu/Desktop/Data-migration/temp_parquet.parquet'
+    thread = threading.Thread(target=process_chunk, args=(con,parquet_file))
+    threads.append(thread)
+    thread.start()
     
     # Wait for all threads to finish
     for thread in threads:
